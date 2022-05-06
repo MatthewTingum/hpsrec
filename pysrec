@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""
+The command line interface for pysrec.
+"""
+
+import os
+
+import click
+
+from zwuenf.pysrec.SRecord import SRecord
+from zwuenf.pysrec.SRecordFile import SRecordFile, MOTType
+from zwuenf.pysrec import SRECError, NotSRecFileError
+
+
+@click.group()
+def cli():
+    """
+    Command line interface for pysrec. Use --help for details.
+    """
+    pass
+
+
+@cli.command(
+    short_help='Print Motorola S-record file.',
+    help="""Print the lines of a Motorola S-Record file.""")
+@click.option('--start', default=0, help='Line to start with printing. (allows python style indexing)')
+@click.option('--end', default=0, help='Line to end with printing. (allows python style indexing)')
+@click.option('--errors/--no-errors', default=False, help='Don\'t stop displaying the file on parsing errors.')
+@click.option('--color/--no-color', default=True, help='Display S-Record colored to improve readability')
+@click.option('--lines/--no-lines', default=True, help='Display line-numbers')
+@click.argument('file')
+def cat(start, end, errors, color, lines, file):
+    """Print the contents of a Motorola S-Record file."""
+
+    if not os.path.isfile(file):
+        click.echo('File: "{}", is not a file or does not exist.'.format(file))
+        exit(1)
+
+    with open(file) as f:
+        records = f.readlines()
+
+    if end is 0:
+        end = len(records)
+
+    i = start
+    if start < 0:
+        i = len(records) + start
+
+    for line in records[start:end]:
+        i += 1
+        try:
+            num = '' if not lines else '[{:08d}] '.format(i)
+            click.echo('{}{}'.format(num, SRecord(line).build_str(color)))
+        except SRECError:
+            if errors:
+                click.echo('Line could no be parsed! Try again with --no-errors to ignore errors.')
+                exit(1)
+            click.echo('[Error]: skipping line...')
+            pass
+
+
+@cli.command(
+    short_help='Show information about a Motorola S-Record file.',
+    help="""Show information about a Motorola S-Record file.""")
+@click.argument('file')
+def info(file):
+    """Gather information about a Motorola S-Record file."""
+
+    if not os.path.isfile(file):
+        print('"{}", is not a file or does not exist.'.format(file))
+        exit(1)
+
+    click.echo('=' * 80)
+    click.echo('Analysing file: {}'.format(file))
+    click.echo('=' * 80)
+
+    try:
+        file = SRecordFile(file)
+    except NotSRecFileError:
+        click.echo('File: "{}", is not a Motorola S-Record file.'.format(file))
+        exit(1)
+
+    click.echo('S-Records: {}'.format(len(file.records)))
+    click.echo('MOT Type: {}'.format(str(file.mot_type()).split('.')[1]))
+
+    click.echo('Records:')
+    count = file.record_counts()
+    for t in count:
+        click.echo('    S{}: {}'.format(hex(t)[2:].upper(), count[t]))
+
+    if file.has_header():
+        click.echo('Header: {}'.format(file.header_content()))
+    else:
+        click.echo('Header: No Header-Record was found!')
+
+    click.echo('Min. address: {}'.format(hex(file.min_address())))
+    click.echo('Max. address: {}'.format(hex(file.max_address())))
+
+    click.echo('=' * 80)
+    click.echo()
+
+
+@cli.command(
+    short_help='Check a Motorola S-Record file.',
+    help="""Check a Motorola S-Record file for abnormality and errors.""")
+@click.option('--types/--no-types', default=True, help='Test TYPE field for valid SX types')
+@click.option('--count/--no-count', default=True, help='Test COUNT field for valid byte count.')
+@click.option('--crc/--no-crc', default=True, help='Test CRC fields.')
+@click.argument('file')
+def check(types, count, crc, file):
+    """Check each S-Record if the record types, count fields and crc sums are valid."""
+
+    if not os.path.isfile(file):
+        print('"{}", is not a file or does not exist.'.format(file))
+        exit(1)
+
+    click.echo('=' * 80)
+    click.echo('Checking file: {}'.format(file))
+    click.echo('=' * 80)
+
+    try:
+        file = SRecordFile(file)
+    except NotSRecFileError:
+        click.echo('File: "{}", is not a Motorola S-Record file.'.format(file))
+        exit(1)
+
+    if types:
+        click.echo('Checking Record types...')
+
+        click.echo()
+        mot_type = file.mot_type()
+        click.echo('MOT Type: {}'.format(str(mot_type).split('.')[1]))
+
+        click.echo()
+        click.echo('Records:')
+        if mot_type == MOTType.UNKNOWN:
+            count = file.record_counts()
+            for t in count:
+                if not (0 <= t <= 3 or t == 5 or 7 <= t <= 9):
+                    click.echo('Invalid TYPE S{} found {} times'.format(hex(t)[2:].upper(), count[t]))
+        else:
+            click.echo('All Record types are valid.')
+
+        click.echo()
+        click.echo('Header:')
+        if not file.has_header():
+            click.echo('File has no S0 header record!')
+        else:
+            click.echo('File has a S0 header record.')
+
+    click.echo('=' * 80)
+
+    click.echo('Checking for invalid COUNT fields...')
+    click.echo()
+    if count:
+        for i, rec in enumerate(file.records):
+            if not rec.is_count_valid():
+                click.echo('Invalid COUNT: [{:08d}] {}'.format(i, rec))
+
+    click.echo('=' * 80)
+
+    click.echo('Checking for invalid CRC fields...')
+    click.echo()
+    if crc:
+        for i, rec in enumerate(file.records):
+            if not rec.is_crc_valid():
+                click.echo('Invalid CRC: [{:08d}] {}'.format(i, rec))
+
+    click.echo('=' * 80)
+    click.echo()
+
+
+@cli.command(
+    short_help='Generate a binary file from a Motorola S-Record file.',
+    help="""Generate a binary file from a Motorola S-Record file.""")
+# TODO: Add a option to select the fill byte!
+@click.argument('file')
+@click.argument('target')
+def binary(file, target):
+    """Generate a binary file from a S-Record file"""
+
+    if not os.path.isfile(file):
+        print('"{}", is not a file or does not exist.'.format(file))
+        exit(1)
+
+    click.echo('Converting file {} to binary {} ...'.format(file, target))
+
+    try:
+        file = SRecordFile(file)
+    except NotSRecFileError:
+        click.echo('File: "{}", is not a Motorola S-Record file.'.format(file))
+        exit(1)
+
+    # TODO: implement!
+    file.write_binary(target)
+    click.echo('Converting file done!')
+
+
+if __name__ == '__main__':
+    cli()
